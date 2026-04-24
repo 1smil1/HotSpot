@@ -35,7 +35,7 @@ iface_Icache	332.01
 iface_Dcache	334.73
 iface_Bpred_0	332.23
 iface_Bpred_1	333.99
-iface_Bpred_2	334.21
+iface_Bpred_2	334.20
 iface_DTB_0	333.11
 iface_DTB_1	333.35
 iface_DTB_2	332.11
@@ -53,7 +53,7 @@ iface_IntMap	330.88
 iface_IntQ	333.42
 iface_IntReg_0	340.50
 iface_IntReg_1	339.56
-iface_IntExec	335.76
+iface_IntExec	335.75
 iface_FPQ	331.64
 iface_LdStQ	336.20
 iface_ITB_0	333.28
@@ -67,7 +67,7 @@ hsp_Bpred_0	328.57
 hsp_Bpred_1	329.55
 hsp_Bpred_2	330.09
 hsp_DTB_0	330.42
-hsp_DTB_1	330.36
+hsp_DTB_1	330.35
 hsp_DTB_2	329.52
 hsp_FPAdd_0	328.23
 hsp_FPAdd_1	329.27
@@ -106,12 +106,12 @@ hsink_FPReg_1	326.66
 hsink_FPReg_2	326.95
 hsink_FPReg_3	327.12
 hsink_FPMul_0	326.36
-hsink_FPMul_1	326.81
-hsink_FPMap_0	326.10
+hsink_FPMul_1	326.80
+hsink_FPMap_0	326.09
 hsink_FPMap_1	326.47
 hsink_IntMap	326.88
 hsink_IntQ	327.09
-hsink_IntReg_0	326.92
+hsink_IntReg_0	326.91
 hsink_IntReg_1	326.72
 hsink_IntExec	327.26
 hsink_FPQ	327.39
@@ -128,5 +128,5 @@ inode_6	324.76
 inode_7	322.51
 inode_8	321.80
 inode_9	321.94
-inode_10	323.04
+inode_10	323.03
 inode_11	321.37

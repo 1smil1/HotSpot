@@ -33,13 +33,13 @@ cp outputs/gcc.steady gcc.init
 # outputs the internal grid temperatures directly (without
 # aggregating them into per-block temperatures). This can help in
 # learning how temperatures vary 'within' a block. Also, the Perl script
-# 'grid_thermal_map.pl' or the Python script `grid_thermal_map.py` can produce color images
+# `grid_thermal_map.py` can produce PNG or SVG color images
 # of these temperatures with a superposed drawing of the floorplan for easy
 # viewing. Note that we need to first split gcc.grid.steady into layer-specific temperature
 # files. Although we've only given a single layer to be simulated, HotSpot is also simulating
 # the Thermal Interface Material (TIM), heat spreader, and heat sink as separate layers
 ../../scripts/split_grid_steady.py outputs/gcc.grid.steady 4 64 64
-../../scripts/grid_thermal_map.pl ev6.flp outputs/gcc_layer0.grid.steady > outputs/gcc.svg
+../../scripts/grid_thermal_map.py ev6.flp outputs/gcc_layer0.grid.steady outputs/gcc.svg
 ../../scripts/grid_thermal_map.py ev6.flp outputs/gcc_layer0.grid.steady outputs/gcc.png
 
 # HotSpot also provides the `-grid_transient_file <file>` option to view

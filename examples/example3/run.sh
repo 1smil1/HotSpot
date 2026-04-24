@@ -33,4 +33,4 @@ cp outputs/example.steady example.init
 # Visualize Heat Map of Layer 0 with Perl and with Python script
 ../../scripts/split_grid_steady.py outputs/example.grid.steady 6 64 64
 ../../scripts/grid_thermal_map.py floorplan2.flp outputs/example_layer2.grid.steady 64 64 outputs/layer2.png
-../../scripts/grid_thermal_map.pl floorplan2.flp outputs/example_layer2.grid.steady 64 64 > outputs/layer2.svg
+../../scripts/grid_thermal_map.py floorplan2.flp outputs/example_layer2.grid.steady 64 64 outputs/layer2.svg

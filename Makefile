@@ -219,7 +219,7 @@ filelist:
 		  $(FLPIN) $(TEMPIN) $(PACKIN) $(BLKIN) $(GRIDIN) $(MISCIN) \
 		  hotspot.h hotspot.c hotfloorplan.h hotfloorplan.c \
 		  sim-template_block.c \
-		  tofig.pl grid_thermal_map.pl \
+		  tofig.py grid_thermal_map.py \
 		  Makefile
 clean:
 	$(RM) *.$(OEXT) *.obj *.d core *~ Makefile.bak hotspot hotfloorplan libhotspot.$(LEXT)
