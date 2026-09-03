@@ -1,0 +1,6 @@
+# Placeholder power trace. thermal_manager.py regenerates this file on every
+# run from chiplet_power_timeseries.json before invoking run_example_hisim.py.
+# The line below is a fallback so hotspot.exe doesn't crash if the script
+# is invoked standalone.
+chiplet0
+0

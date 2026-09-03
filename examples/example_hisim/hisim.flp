@@ -1,0 +1,5 @@
+# Placeholder floorplan. thermal_manager.py will regenerate this file on every
+# run from hotspot_geometry.json before invoking run_example_hisim.py.
+# The single chiplet0 block below is a fallback so hotspot.exe doesn't crash
+# if the script is invoked standalone.
+chiplet0	0.005	0.005	0	0
