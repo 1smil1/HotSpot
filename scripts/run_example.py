@@ -9,8 +9,8 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-HOTSPOT = REPO_ROOT / "hotspot.exe"
-HOTFLOORPLAN = REPO_ROOT / "hotfloorplan.exe"
+HOTSPOT = REPO_ROOT / ("hotspot.exe" if os.name == "nt" else "hotspot")
+HOTFLOORPLAN = REPO_ROOT / ("hotfloorplan.exe" if os.name == "nt" else "hotfloorplan")
 PYTHON = Path(os.environ.get("HOTSPOT_PYTHON", sys.executable))
 PERL = shutil.which("perl")
 

@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-HOTSPOT = REPO_ROOT / "hotspot.exe"
+HOTSPOT = REPO_ROOT / ("hotspot.exe" if os.name == "nt" else "hotspot")
 DEFAULT_EXAMPLE_DIR = REPO_ROOT / "examples" / "example7"
 DEFAULT_CONFIG_NAME = "example7.config"
 DEFAULT_FLP_NAME = "example7.flp"
@@ -99,11 +99,10 @@ def rectangles_overlap(a: Dict[str, Any], b: Dict[str, Any]) -> bool:
     b_right = b["x_m"] + b["width_m"]
     b_bottom = b["y_m"]
     b_top = b["y_m"] + b["height_m"]
-    return not (
-        a_right <= b_left
-        or b_right <= a_left
-        or a_top <= b_bottom
-        or b_top <= a_bottom
+    # ThermalManager quantizes geometry to 1 pm; shared edges may differ by float roundoff.
+    return (
+        min(a_right, b_right) - max(a_left, b_left) > 1e-12
+        and min(a_top, b_top) - max(a_bottom, b_bottom) > 1e-12
     )
 
 

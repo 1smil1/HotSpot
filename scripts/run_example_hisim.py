@@ -32,7 +32,7 @@ from typing import Any, Dict, List, Optional
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-HOTSPOT = REPO_ROOT / "hotspot.exe"
+HOTSPOT = REPO_ROOT / ("hotspot.exe" if os.name == "nt" else "hotspot")
 DEFAULT_EXAMPLE_DIR = REPO_ROOT / "examples" / "example_hisim"
 DEFAULT_CONFIG_NAME = "hisim.config"
 DEFAULT_FLP_NAME = "hisim.flp"
