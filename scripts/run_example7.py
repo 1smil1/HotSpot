@@ -59,14 +59,20 @@ def reset_outputs(example_dir: Path) -> None:
 
 
 def run_checked(command: List[str], cwd: Path, env: Dict[str, str]) -> None:
-    result = subprocess.run(command, cwd=str(cwd), env=env, check=False)
+    result = subprocess.run(command, cwd=str(cwd), env=env, check=False, capture_output=True, text=True)
+    log = cwd / DEFAULT_OUTPUT_DIRNAME / 'hotspot.log'
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with log.open('a', encoding='utf-8') as stream:
+        stream.write(' '.join(command) + '\n' + result.stdout + '\n' + result.stderr + '\n')
     if result.returncode != 0:
         raise RuntimeError(
-            f"Command failed with exit code {result.returncode}: {' '.join(command)}"
+            f"Command failed with exit code {result.returncode}: {' '.join(command)}\n{result.stderr}\nSee {log}"
         )
 
 
 def to_float(value: Any, field_name: str) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"Field '{field_name}' must be numeric, got boolean")
     try:
         numeric = float(value)
     except (TypeError, ValueError) as exc:
@@ -78,7 +84,10 @@ def to_float(value: Any, field_name: str) -> float:
 
 def to_int(value: Any, field_name: str) -> int:
     try:
-        return int(value)
+        number = to_float(value, field_name)
+        if not number.is_integer():
+            raise ValueError(f'{field_name} must be an integer')
+        return int(number)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"Field '{field_name}' must be an integer, got {value!r}") from exc
 
@@ -116,18 +125,20 @@ def normalize_blocks(blocks_raw: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if not isinstance(raw, dict):
             raise ValueError(f"Block at index {index} must be an object")
 
-        chiplet_id = raw.get("chiplet_id")
+        chiplet_id = raw['chiplet_id']
         if chiplet_id is None:
             raise ValueError(
                 f"Block at index {index} is missing required field 'chiplet_id'"
             )
         chiplet_id = to_int(chiplet_id, "chiplet_id")
 
-        name = str(raw.get("name") or f"chiplet{chiplet_id}")
-        width_m = to_float(raw.get("width_m"), "width_m")
-        height_m = to_float(raw.get("height_m"), "height_m")
-        x_m = to_float(raw.get("x_m"), "x_m")
-        y_m = to_float(raw.get("y_m"), "y_m")
+        name = raw['name']
+        if not isinstance(name, str) or not name or chiplet_id < 0:
+            raise ValueError('Geometry requires a nonempty name and nonnegative chiplet_id')
+        width_m = to_float(raw['width_m'], 'width_m')
+        height_m = to_float(raw['height_m'], 'height_m')
+        x_m = to_float(raw['x_m'], 'x_m')
+        y_m = to_float(raw['y_m'], 'y_m')
 
         if width_m <= 0 or height_m <= 0:
             raise ValueError(
@@ -160,7 +171,7 @@ def normalize_blocks(blocks_raw: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 def load_geometry_blocks(path: Path) -> List[Dict[str, Any]]:
     data = load_json(path)
-    blocks_raw = data.get("blocks")
+    blocks_raw = data['blocks']
     if not isinstance(blocks_raw, list):
         raise ValueError(f"Geometry JSON {path} must contain a list field 'blocks'")
     return normalize_blocks(blocks_raw)
@@ -207,8 +218,8 @@ def read_floorplan(path: Path) -> List[Dict[str, Any]]:
     return normalize_blocks(blocks)
 
 
-def validate_timeseries(data: Dict[str, Any]) -> Dict[int, List[Dict[str, Any]]]:
-    chiplets_raw = data.get("chiplets")
+def validate_timeseries(data: Dict[str, Any], legacy_time_axis: bool = False) -> Dict[int, List[Dict[str, Any]]]:
+    chiplets_raw = data['chiplets']
     if not isinstance(chiplets_raw, list):
         raise ValueError("chiplet_power_timeseries.json must contain list field 'chiplets'")
 
@@ -217,8 +228,10 @@ def validate_timeseries(data: Dict[str, Any]) -> Dict[int, List[Dict[str, Any]]]
     for chiplet in chiplets_raw:
         if not isinstance(chiplet, dict):
             raise ValueError("Each chiplet entry must be an object")
-        chiplet_id = to_int(chiplet.get("chiplet_id"), "chiplet_id")
-        samples = chiplet.get("samples")
+        chiplet_id = to_int(chiplet['chiplet_id'], 'chiplet_id')
+        if chiplet_id < 0 or chiplet_id in samples_by_chiplet:
+            raise ValueError('Invalid/duplicate timeseries chiplet_id')
+        samples = chiplet['samples']
         if not isinstance(samples, list):
             raise ValueError(f"Chiplet {chiplet_id} must contain list field 'samples'")
         if expected_steps is None:
@@ -231,10 +244,14 @@ def validate_timeseries(data: Dict[str, Any]) -> Dict[int, List[Dict[str, Any]]]
         for sample in samples:
             if not isinstance(sample, dict):
                 raise ValueError(f"Chiplet {chiplet_id} has non-object sample entry")
-            _ = to_float(sample.get("start_us"), "start_us")
-            _ = to_float(sample.get("end_us"), "end_us")
-            _ = to_float(sample.get("duration_us"), "duration_us")
-            _ = to_float(sample.get("total_power_uW"), "total_power_uW")
+            start = to_float(sample['start_us'], 'start_us')
+            end = to_float(sample['end_us'], 'end_us')
+            duration = to_float(sample['duration_us'], 'duration_us')
+            power = to_float(sample['total_power_uW'], 'total_power_uW')
+            if start < 0 or end <= start or power < 0 or not math.isclose(end-start, duration, rel_tol=1e-9, abs_tol=1e-12):
+                raise ValueError('Invalid power sample bounds/power')
+            if not legacy_time_axis and not math.isclose(duration, data['step_size_us'], rel_tol=1e-9, abs_tol=1e-12):
+                raise ValueError('HotSpot power samples must be uniform in duration')
         samples_by_chiplet[chiplet_id] = samples
     return samples_by_chiplet
 
@@ -242,21 +259,28 @@ def validate_timeseries(data: Dict[str, Any]) -> Dict[int, List[Dict[str, Any]]]
 def build_ptrace_rows(
     blocks: List[Dict[str, Any]],
     power_timeseries: Dict[str, Any],
+    legacy_time_axis: bool = False,
 ) -> tuple[List[str], List[List[float]], float]:
-    step_size_us = to_float(power_timeseries.get("step_size_us"), "step_size_us")
+    step_size_us = to_float(power_timeseries['step_size_us'], 'step_size_us')
     if step_size_us <= 0:
         raise ValueError(f"step_size_us must be > 0, got {step_size_us}")
 
-    samples_by_chiplet = validate_timeseries(power_timeseries)
-    num_steps = to_int(power_timeseries.get("num_steps"), "num_steps")
-    if num_steps < 0:
-        raise ValueError(f"num_steps must be >= 0, got {num_steps}")
-    if num_steps == 0:
-        if samples_by_chiplet:
-            inferred = len(next(iter(samples_by_chiplet.values())))
-            num_steps = inferred
-        if num_steps == 0:
-            raise ValueError("Power timeseries contains no samples")
+    samples_by_chiplet = validate_timeseries(power_timeseries, legacy_time_axis)
+    num_steps = to_int(power_timeseries['num_steps'], 'num_steps')
+    if num_steps <= 0 or any(len(samples) != num_steps for samples in samples_by_chiplet.values()):
+        raise ValueError('Power timeseries num_steps must match nonempty sample arrays')
+    ids = [b['chiplet_id'] for b in blocks]
+    if len(set(ids)) != len(ids) or set(ids) != set(samples_by_chiplet):
+        raise ValueError('Geometry/timeseries chiplet inventory must match exactly')
+    if not legacy_time_axis:
+        start = to_float(power_timeseries['global_start_us'], 'global_start_us')
+        end = to_float(power_timeseries['global_end_us'], 'global_end_us')
+        if start < 0 or end <= start or not math.isclose(end-start, num_steps*step_size_us, rel_tol=1e-9, abs_tol=1e-12):
+            raise ValueError('Declared global duration must equal num_steps times step_size_us')
+        for chiplet_id, samples in samples_by_chiplet.items():
+            for index, sample in enumerate(samples):
+                if not math.isclose(sample['start_us'], start+index*step_size_us, rel_tol=1e-9, abs_tol=1e-12) or not math.isclose(sample['end_us'], start+(index+1)*step_size_us, rel_tol=1e-9, abs_tol=1e-12):
+                    raise ValueError(f'Chiplet {chiplet_id} sample {index} timestamps must use the identical continuous global time axis')
 
     header = [block["name"] for block in blocks]
     rows: List[List[float]] = []
@@ -276,7 +300,7 @@ def build_ptrace_rows(
                     f"Chiplet {chiplet_id} is missing sample index {step_index}"
                 )
             total_power_uw = to_float(
-                chiplet_samples[step_index].get("total_power_uW"),
+                chiplet_samples[step_index]['total_power_uW'],
                 "total_power_uW",
             )
             row.append(total_power_uw / 1e6)
@@ -341,7 +365,74 @@ def run_hotspot(
     run_checked(second_cmd, example_dir, env)
 
 
+def run_solvers(example_dir: Path, sampling_intvl_s: float, options: Dict[str, Any],
+                env: Dict[str, str], extra_args: Optional[List[str]] = None) -> Dict[str, str]:
+    """Independent steady/cold runs; periodic replay keeps all state in HotSpot."""
+    choices = {'solver': {'steady','transient','both'}, 'workload': {'runtime','periodic','all_tiles'},
+               'model_type': {'block','grid'}, 'init': {'ambient','mean_steady'}}
+    for field, allowed in choices.items():
+        if options[field] not in allowed:
+            raise ValueError(f'Invalid thermal {field}: {options[field]!r}')
+    if not math.isfinite(sampling_intvl_s) or sampling_intvl_s <= 0:
+        raise ValueError('sampling_intvl_s must be positive and finite')
+    if options['workload'] == 'periodic' and options['init'] != 'mean_steady':
+        raise ValueError('periodic requires mean_steady initialization; ambient requires finite runtime workload')
+    requested_record_us = options['record_step_us'] if 'record_step_us' in options else 1.0
+    if not math.isfinite(requested_record_us) or requested_record_us <= 0:
+        raise ValueError('record_step_us must be positive and finite')
+    output = example_dir / DEFAULT_OUTPUT_DIRNAME
+    output.mkdir(parents=True, exist_ok=True)
+    rows, cols = options['grid'].split('x')
+    base = [str(HOTSPOT), '-c', DEFAULT_CONFIG_NAME, '-f', DEFAULT_FLP_NAME,
+            '-model_type', options['model_type'], '-grid_rows', rows, '-grid_cols', cols,
+            '-sampling_intvl', f'{sampling_intvl_s:.12g}'] + (extra_args if extra_args is not None else [])
+    result = {}
+    (output / 'hotspot.log').write_text('', encoding='utf-8')
+    if options['solver'] in {'steady', 'both'}:
+        steady = output / 'mean.steady'
+        command = base + ['-p', 'mean.ptrace', '-precise_steady_file', str(steady)]
+        if options['model_type'] == 'grid':
+            command += ['-grid_steady_file', str(output / 'mean.grid.steady')]
+        run_checked(command, example_dir, env)
+        result['steady_file'] = str(steady)
+    if options['solver'] in {'transient', 'both'}:
+        label = 'periodic' if options['workload'] == 'periodic' else 'cold'
+        transient = output / (label + '.ttrace')
+        statistics = output / (label + '.statistics.json')
+        record_times = output / (label + '.record_times.csv')
+        curve = output / (label + '.curve.csv')
+        command = base + ['-p', DEFAULT_PTRACE_NAME, '-o', str(transient),
+                         '-mean_steady_init', '1' if options['init'] == 'mean_steady' else '0',
+                         '-record_intvl', str(max(requested_record_us*1e-6, sampling_intvl_s)),
+                         '-transient_statistics', str(statistics), '-record_times', str(record_times),
+                         '-temperature_curve', str(curve)]
+        if options['workload'] == 'periodic':
+            command += ['-periodic', '1', '-periodic_metadata', str(output / 'periodic.json')]
+        if options['model_type'] == 'grid':
+            peak_snapshot = output / (label + '.grid.peak_instant')
+            command += ['-grid_peak_file', str(output / (label + '.grid.peak')),
+                        '-grid_peak_snapshot', str(peak_snapshot)]
+            result['peak_snapshot_file'] = str(peak_snapshot)
+        run_checked(command, example_dir, env)
+        result['transient_file'] = str(transient)
+        result['transient_statistics_file'] = str(statistics)
+        result['record_times_file'] = str(record_times)
+        result['temperature_curve_file'] = str(curve)
+    return result
+
+
+def validate_prepared_options(data: Dict[str, Any], options: Dict[str, Any]) -> None:
+    if options['structure'] != '2d' or options['leakage_json'] is not None or options['package_json'] is not None:
+        raise ValueError('Prepared trace CLI cannot change physical package/leakage; use ThermalManager CLI')
+    if data['workload'] != options['workload']:
+        raise ValueError(f'Prepared trace workload {data["workload"]!r} differs from requested {options["workload"]!r}; use ThermalManager to regenerate')
+    if options['duration_us'] is not None and not math.isclose(options['duration_us'], data['global_end_us']-data['global_start_us'], rel_tol=1e-9):
+        raise ValueError('Prepared trace duration differs from requested duration; use ThermalManager to regenerate')
+
+
 def main() -> int:
+    sys.path.insert(0, str(REPO_ROOT.parents[1]))
+    from chip.thermal.options import add_thermal_arguments, thermal_options
     parser = argparse.ArgumentParser(description="Generate and run HotSpot example7")
     parser.add_argument(
         "--power-timeseries-json",
@@ -376,6 +467,8 @@ def main() -> int:
         action="store_true",
         help="Only run the first pass that writes steady output",
     )
+    parser.add_argument('--legacy-preheated', action='store_true', help='Deprecated v1 two-pass replay for existing mode1 API')
+    add_thermal_arguments(parser)
     args = parser.parse_args()
 
     env = ensure_runtime_path()
@@ -386,8 +479,6 @@ def main() -> int:
 
     assert_file(HOTSPOT)
     assert_file(config_path)
-
-    reset_outputs(example_dir)
 
     if flp_path.exists() and not args.rewrite_floorplan:
         print(f"Reusing floorplan: {flp_path}")
@@ -406,7 +497,14 @@ def main() -> int:
     power_timeseries_path = Path(args.power_timeseries_json)
     print(f"Loading power timeseries: {power_timeseries_path}")
     power_timeseries = load_json(power_timeseries_path)
-    header, rows, step_size_us = build_ptrace_rows(blocks, power_timeseries)
+    header, rows, step_size_us = build_ptrace_rows(blocks, power_timeseries, legacy_time_axis=args.legacy_preheated)
+    options = None
+    if not args.legacy_preheated:
+        options = thermal_options(vars(args))
+        if args.steady_only:
+            options['solver'] = 'steady'
+        validate_prepared_options(power_timeseries, options)
+    reset_outputs(example_dir)
 
     print(f"Writing power trace: {ptrace_path}")
     write_ptrace(ptrace_path, header, rows)
@@ -420,12 +518,13 @@ def main() -> int:
         "Running HotSpot example7 "
         f"(samples={len(rows)}, step_size_us={step_size_us}, sampling_intvl_s={sampling_intvl_s})"
     )
-    run_hotspot(
-        example_dir=example_dir,
-        sampling_intvl_s=sampling_intvl_s,
-        steady_only=args.steady_only,
-        env=env,
-    )
+    if args.legacy_preheated:
+        print('WARNING: deprecated legacy preheated one-pass replay; use explicit thermal solvers. Removal follows mode1 caller migration.')
+        run_hotspot(example_dir, sampling_intvl_s, args.steady_only, env)
+    else:
+        means = [math.fsum(row[i] for row in rows)/len(rows) for i in range(len(header))]
+        write_ptrace(example_dir / 'mean.ptrace', header, [means])
+        run_solvers(example_dir, sampling_intvl_s, options, env)
     print(f"Done. Outputs are under: {example_dir / DEFAULT_OUTPUT_DIRNAME}")
     return 0
 

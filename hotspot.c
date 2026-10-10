@@ -260,8 +260,8 @@ void write_vals(FILE *fp, double *vals, int size)
 {
   int i;
   for(i=0; i < size-1; i++)
-    fprintf(fp, "%.2f\t", vals[i]);
-  fprintf(fp, "%.2f\n", vals[i]);
+    fprintf(fp, "%.9f\t", vals[i]);
+  fprintf(fp, "%.9f\n", vals[i]);
 }
 
 char **alloc_names(int nr, int nc)
@@ -291,6 +291,29 @@ void print_dashed_line(int length) {
   for(i = 0; i < length; i++)
     printf("-");
   printf("\n");
+}
+
+/* Precise mesh maps retain small temperature rises; peaks avoid dense grid traces. */
+void dump_exact_grid(grid_model_t *model, double *values, const char *filename) {
+  int layer, cell;
+  FILE *fp = fopen(filename, "w");
+  if (!fp) fatal("unable to open grid map output\n");
+  for (layer = 0; layer < model->n_layers; layer++) {
+    fprintf(fp, "Layer %d:\n", layer);
+    for (cell = 0; cell < model->rows * model->cols; cell++)
+      fprintf(fp, "%d\t%.9f\n", cell, values[layer * model->rows * model->cols + cell]);
+  }
+  fclose(fp);
+}
+
+double hottest_grid_cell(grid_model_t *model) {
+  int layer, cell;
+  double peak = -INFINITY;
+  for (layer = 0; layer < model->n_layers; layer++)
+    if (model->layers[layer].has_power)
+      for (cell = 0; cell < model->rows * model->cols; cell++)
+        peak = fmax(peak, model->last_trans->cuboid[0][0][layer*model->rows*model->cols+cell]);
+  return peak;
 }
 
 #if VERBOSE>1
@@ -358,6 +381,19 @@ int main(int argc, char **argv)
 {
   int i, j, idx, base = 0, count = 0, n = 0;
   int num, size, lines = 0, do_transient = TRUE;
+  int periodic = 0, mean_init = 0, prescan = 0, cycle = 0, stable_cycles = 0;
+  int state_size = 0, state_i, cycle_lines = 0;
+  double *cycle_state = NULL, *internal_state = NULL, cycle_delta = 0.0;
+  long trace_start;
+  char periodic_metadata[STR_SIZE] = "";
+  char grid_peak_file[STR_SIZE] = "";
+  char precise_steady_file[STR_SIZE] = "";
+  double *grid_peaks = NULL;
+  char statistics_file[STR_SIZE] = "", record_times_file[STR_SIZE] = "", curve_file[STR_SIZE] = "", snapshot_file[STR_SIZE] = "";
+  double record_interval = 0.0, global_peak = -INFINITY, global_peak_time = 0.0, current_peak = 0.0;
+  double *sample_sums = NULL, *sample_peaks = NULL, *sample_peak_times = NULL, *peak_snapshot = NULL;
+  FILE *record_times = NULL, *curve = NULL;
+  int record_stride = 1, last_record_step = 0;
   char **names;
   double *vals;
   /* trace file pointers	*/
@@ -413,6 +449,35 @@ int main(int argc, char **argv)
    * have priority over config file
    */
   size = str_pairs_remove_duplicates(table, size);
+  if ((idx = get_str_index(table, size, "periodic")) >= 0) {
+    if (strcmp(table[idx].value, "0") && strcmp(table[idx].value, "1"))
+      fatal("periodic must be 0 or 1\n");
+    periodic = atoi(table[idx].value);
+  }
+  if ((idx = get_str_index(table, size, "mean_steady_init")) >= 0) {
+    if (strcmp(table[idx].value, "0") && strcmp(table[idx].value, "1"))
+      fatal("mean_steady_init must be 0 or 1\n");
+    mean_init = atoi(table[idx].value);
+  }
+  if ((idx = get_str_index(table, size, "periodic_metadata")) >= 0)
+    strcpy(periodic_metadata, table[idx].value);
+  if ((idx = get_str_index(table, size, "grid_peak_file")) >= 0)
+    strcpy(grid_peak_file, table[idx].value);
+  if ((idx = get_str_index(table, size, "precise_steady_file")) >= 0)
+    strcpy(precise_steady_file, table[idx].value);
+  if ((idx = get_str_index(table, size, "transient_statistics")) >= 0) strcpy(statistics_file, table[idx].value);
+  if ((idx = get_str_index(table, size, "record_times")) >= 0) strcpy(record_times_file, table[idx].value);
+  if ((idx = get_str_index(table, size, "temperature_curve")) >= 0) strcpy(curve_file, table[idx].value);
+  if ((idx = get_str_index(table, size, "grid_peak_snapshot")) >= 0) strcpy(snapshot_file, table[idx].value);
+  if ((idx = get_str_index(table, size, "record_intvl")) >= 0 &&
+      (sscanf(table[idx].value, "%lf", &record_interval) != 1 || !isfinite(record_interval) || record_interval <= 0))
+    fatal("record_intvl must be positive and finite\n");
+  if ((periodic || mean_init) && !do_transient)
+    fatal("periodic/mean_steady_init requires transient output\n");
+  /* Tiny periods can hide ambient warmup under the cycle-delta tolerance. */
+  if (periodic && !mean_init)
+    fatal("periodic requires mean_steady_init=1; ambient cycle deltas cannot establish periodic steady state\n");
+  prescan = mean_init;
 
   /* BU_3D: check if heterogenous R-C modeling is on */
   if(!strcmp(global_config.detailed_3D, "on")){
@@ -433,6 +498,8 @@ int main(int argc, char **argv)
   thermal_config = default_thermal_config();
   /* modify according to command line / config file	*/
   thermal_config_add_from_strs(&thermal_config, &materials_list, table, size);
+  if (record_interval > 0) record_stride = (int)ceil(record_interval / thermal_config.sampling_intvl - 1e-12);
+  if (record_stride < 1) record_stride = 1;
 
   use_microchannels = global_config.use_microchannels;
   if(use_microchannels) {
@@ -559,6 +626,30 @@ int main(int argc, char **argv)
   names = alloc_names(MAX_UNITS, STR_SIZE);
   if(read_names(pin, names) != n)
     fatal("no. of units in floorplan and trace file differ\n");
+  trace_start = ftell(pin);
+  if (do_transient) {
+    if (model->type == BLOCK_MODEL) {
+      state_size = model->block->n_nodes;
+      internal_state = temp;
+    } else {
+      state_size = model->grid->n_layers * model->grid->rows * model->grid->cols
+        + EXTRA + (model->config->model_secondary ? EXTRA_SEC : 0);
+      internal_state = model->grid->last_trans->cuboid[0][0];
+      /* Initialize the grid once; all replay calls retain the full internal state. */
+      xlate_vector_b2g(model->grid, temp, model->grid->last_trans, V_TEMP);
+      model->grid->last_temp = temp;
+    }
+    cycle_state = dvector(state_size);
+    memcpy(cycle_state, internal_state, state_size * sizeof(double));
+    if (model->type == GRID_MODEL && grid_peak_file[0]) {
+      grid_peaks = dvector(state_size);
+      memcpy(grid_peaks, internal_state, state_size * sizeof(double));
+    }
+    if (model->type == GRID_MODEL && snapshot_file[0]) peak_snapshot = dvector(state_size);
+    sample_sums = dvector(n);
+    sample_peaks = dvector(n);
+    sample_peak_times = dvector(n);
+  }
 
   /* header line of temperature trace	*/
   if (do_transient)
@@ -566,6 +657,43 @@ int main(int argc, char **argv)
 
   /* read the instantaneous power trace	*/
   vals = dvector(MAX_UNITS);
+start_cycle:
+  if (do_transient && !prescan) {
+    global_peak = model->type == GRID_MODEL ? hottest_grid_cell(model->grid) : -INFINITY;
+    global_peak_time = 0.0;
+    last_record_step = 0;
+    memset(sample_sums, 0, n*sizeof(double));
+    memset(sample_peak_times, 0, n*sizeof(double));
+    if (model->type == BLOCK_MODEL)
+      for (i = 0; i < n; i++) {
+        sample_peaks[i] = temp[get_blk_index(flp, names[i])];
+        global_peak = fmax(global_peak, sample_peaks[i]);
+      }
+    else
+      for (i=0, base=0, count=0; i < model->grid->n_layers; i++) {
+        if (model->grid->layers[i].has_power) {
+          for (j=0; j < model->grid->layers[i].flp->n_units; j++) {
+            idx = get_blk_index(model->grid->layers[i].flp, names[count+j]);
+            sample_peaks[count+j] = temp[base+idx];
+          }
+          count += model->grid->layers[i].flp->n_units;
+        }
+        base += model->grid->layers[i].flp->n_units;
+      }
+    if (peak_snapshot) memcpy(peak_snapshot, internal_state, state_size*sizeof(double));
+    if (record_times_file[0]) {
+      if (record_times) fclose(record_times);
+      if (!(record_times = fopen(record_times_file, "w"))) fatal("unable to open recorded timestamps\n");
+      fprintf(record_times, "solver_step,time_us\n");
+    }
+    if (curve_file[0]) {
+      if (curve) fclose(curve);
+      if (!(curve = fopen(curve_file, "w"))) fatal("unable to open temperature curve\n");
+      fprintf(curve, "solver_step,time_us,global_hotspot_K\n");
+      fprintf(curve, "0,0,%.12g\n", global_peak);
+    }
+  }
+replay_trace:
   while ((num=read_vals(pin, vals)) != 0) {
       if(num != n)
         fatal("invalid trace file format\n");
@@ -587,7 +715,7 @@ int main(int argc, char **argv)
         }
 
       /* compute temperature	*/
-      if (do_transient) {
+      if (do_transient && !prescan) {
           /* if natural convection is considered, update transient convection resistance first */
           if (natural) {
               avg_sink_temp = calc_sink_temp(model, temp);
@@ -603,15 +731,18 @@ int main(int argc, char **argv)
            * this is used to maintain the internal grid temperatures
            * across multiple calls of compute_temp
            */
-          if (model->type == BLOCK_MODEL || lines == 0)
+          if (model->type == BLOCK_MODEL)
             compute_temp(model, power, temp, model->config->sampling_intvl);
           else
             compute_temp(model, power, NULL, model->config->sampling_intvl);
+          if (grid_peaks)
+            for (state_i = 0; state_i < state_size; state_i++)
+              grid_peaks[state_i] = fmax(grid_peaks[state_i], internal_state[state_i]);
 
 
         // Print grid transient temperatures to file if one has been specified
         if(model->type == GRID_MODEL && strcmp(model->config->grid_transient_file, NULLFILE)) {
-          dump_transient_temp_grid(model->grid, lines, model->config->sampling_intvl, model->config->grid_transient_file);
+          dump_transient_temp_grid(model->grid, cycle_lines, model->config->sampling_intvl, model->config->grid_transient_file);
         }
           /* permute back to the trace file order	*/
           if (model->type == BLOCK_MODEL)
@@ -629,7 +760,26 @@ int main(int argc, char **argv)
                 base += model->grid->layers[i].flp->n_units;
             }
           /* output instantaneous temperature trace	*/
-          write_vals(tout, vals, n);
+          current_peak = model->type == GRID_MODEL ? hottest_grid_cell(model->grid) : -INFINITY;
+          for (i = 0; i < n; i++) {
+            sample_sums[i] += vals[i];
+            if (vals[i] > sample_peaks[i]) {
+              sample_peaks[i] = vals[i];
+              sample_peak_times[i] = (cycle_lines+1)*model->config->sampling_intvl*1e6;
+            }
+            if (model->type == BLOCK_MODEL) current_peak = fmax(current_peak, vals[i]);
+          }
+          if (current_peak > global_peak) {
+            global_peak = current_peak;
+            global_peak_time = (cycle_lines+1)*model->config->sampling_intvl*1e6;
+            if (peak_snapshot) memcpy(peak_snapshot, internal_state, state_size*sizeof(double));
+          }
+          if ((cycle_lines+1) % record_stride == 0) {
+            write_vals(tout, vals, n);
+            last_record_step = cycle_lines+1;
+            if (record_times) fprintf(record_times, "%d,%.12g\n", last_record_step, last_record_step*model->config->sampling_intvl*1e6);
+            if (curve) fprintf(curve, "%d,%.12g,%.12g\n", last_record_step, last_record_step*model->config->sampling_intvl*1e6, current_peak);
+          }
       }
 
       /* for computing average	*/
@@ -645,9 +795,87 @@ int main(int argc, char **argv)
         }
 
       lines++;
+      cycle_lines++;
   }
   if(!lines)
     fatal("no power numbers in trace file\n");
+  if (do_transient && !prescan && last_record_step != cycle_lines) {
+    write_vals(tout, vals, n);
+    if (record_times) fprintf(record_times, "%d,%.12g\n", cycle_lines, cycle_lines*model->config->sampling_intvl*1e6);
+    if (curve) fprintf(curve, "%d,%.12g,%.12g\n", cycle_lines, cycle_lines*model->config->sampling_intvl*1e6, current_peak);
+  }
+
+  if (prescan) {
+    int power_size = model->type == BLOCK_MODEL ? model->block->n_nodes : model->grid->total_n_blocks + EXTRA;
+    for (state_i = 0; state_i < power_size; state_i++)
+      overall_power[state_i] /= lines;
+    steady_state_temp(model, overall_power, steady_temp);
+    if (model->type == BLOCK_MODEL)
+      memcpy(temp, steady_temp, state_size * sizeof(double));
+    else {
+      /* Copy exact cells and package nodes, never remap averaged block temperatures. */
+      memcpy(internal_state, model->grid->last_steady->cuboid[0][0], state_size * sizeof(double));
+      xlate_temp_g2b(model->grid, temp, model->grid->last_trans);
+    }
+    memset(overall_power, 0, power_size * sizeof(double));
+    memcpy(cycle_state, internal_state, state_size * sizeof(double));
+    if (grid_peaks) memcpy(grid_peaks, internal_state, state_size * sizeof(double));
+    prescan = 0;
+    lines = cycle_lines = 0;
+    fseek(pin, trace_start, SEEK_SET);
+    goto start_cycle;
+  }
+  if (periodic) {
+    cycle++;
+    cycle_delta = 0.0;
+    for (state_i = 0; state_i < state_size; state_i++) {
+      if (!isfinite(internal_state[state_i]))
+        fatal("non-finite periodic thermal state\n");
+      cycle_delta = fmax(cycle_delta, fabs(internal_state[state_i] - cycle_state[state_i]));
+    }
+    stable_cycles = cycle_delta <= 0.01 ? stable_cycles + 1 : 0;
+    fprintf(stdout, "Periodic cycle %d: full-state delta %.9g K, stable %d/3\n", cycle, cycle_delta, stable_cycles);
+    if (stable_cycles < 3) {
+      if (cycle >= 1000) {
+        if (periodic_metadata[0]) {
+          FILE *meta = fopen(periodic_metadata, "w");
+          if (!meta) fatal("unable to open periodic failure metadata\n");
+          fprintf(meta, "{\"status\":\"failed\",\"cycles\":1000,\"max_full_state_delta_K\":%.12g,\"consecutive_cycles\":%d}\n", cycle_delta, stable_cycles);
+          fclose(meta);
+        }
+        fatal("periodic thermal convergence failed after 1000 full cycles\n");
+      }
+      memcpy(cycle_state, internal_state, state_size * sizeof(double));
+      if (grid_peaks) memcpy(grid_peaks, internal_state, state_size * sizeof(double));
+      fseek(pin, trace_start, SEEK_SET);
+      cycle_lines = 0;
+      /* Keep only the latest complete waveform; never expand the input trace. */
+      if (!(tout = freopen(global_config.t_outfile, "w", tout)))
+        fatal("unable to rewind transient output\n");
+      write_names(tout, names, n);
+      if (model->type == GRID_MODEL && strcmp(model->config->grid_transient_file, NULLFILE))
+        remove(model->config->grid_transient_file);
+      goto start_cycle;
+    }
+    if (periodic_metadata[0]) {
+      FILE *meta = fopen(periodic_metadata, "w");
+      if (!meta) fatal("unable to open periodic metadata\n");
+      fprintf(meta, "{\"status\":\"converged\",\"cycles\":%d,\"max_full_state_delta_K\":%.12g,\"consecutive_cycles\":%d,\"tolerance_K\":0.01,\"cycle_samples\":%d}\n", cycle, cycle_delta, stable_cycles, cycle_lines);
+      fclose(meta);
+    }
+  }
+  if (grid_peaks)
+    dump_exact_grid(model->grid, grid_peaks, grid_peak_file);
+  if (peak_snapshot) dump_exact_grid(model->grid, peak_snapshot, snapshot_file);
+  if (statistics_file[0] && do_transient) {
+    FILE *fp = fopen(statistics_file, "w");
+    if (!fp) fatal("unable to open transient statistics\n");
+    fprintf(fp, "{\"solver_samples\":%d,\"record_stride\":%d,\"record_interval_us\":%.12g,\"global_peak_temperature_K\":%.12g,\"global_peak_time_us\":%.12g,\"chiplets\":{", cycle_lines, record_stride, record_stride*model->config->sampling_intvl*1e6, global_peak, global_peak_time);
+    for (i = 0; i < n; i++)
+      fprintf(fp, "%s\"%s\":{\"mean_temperature_K\":%.12g,\"peak_temperature_K\":%.12g,\"peak_time_us\":%.12g}", i ? "," : "", names[i], sample_sums[i]/cycle_lines, sample_peaks[i], sample_peak_times[i]);
+    fprintf(fp, "}}\n");
+    fclose(fp);
+  }
 
   /* for computing average	*/
   if (model->type == BLOCK_MODEL)
@@ -687,12 +915,29 @@ int main(int argc, char **argv)
   /* dump steady state temperatures on to file if needed	*/
   if (strcmp(model->config->steady_file, NULLFILE))
     dump_temp(model, steady_temp, model->config->steady_file);
+  if (precise_steady_file[0]) {
+    FILE *fp = fopen(precise_steady_file, "w");
+    if (!fp) fatal("unable to open precise steady output\n");
+    if (model->type == BLOCK_MODEL)
+      for (i = 0; i < flp->n_units; i++)
+        fprintf(fp, "%s\t%.9f\n", flp->units[i].name, steady_temp[i]);
+    else
+      for (i = 0, base = 0; i < model->grid->n_layers; i++) {
+        if (model->grid->layers[i].has_power)
+          for (j = 0; j < model->grid->layers[i].flp->n_units; j++) {
+            if (model->grid->has_lcf) fprintf(fp, "layer_%d_", i);
+            fprintf(fp, "%s\t%.9f\n", model->grid->layers[i].flp->units[j].name, steady_temp[base+j]);
+          }
+        base += model->grid->layers[i].flp->n_units;
+      }
+    fclose(fp);
+  }
   /* for the grid model, optionally dump the most recent
    * steady state temperatures of the grid cells
    */
   if (model->type == GRID_MODEL &&
       strcmp(model->config->grid_steady_file, NULLFILE))
-    dump_steady_temp_grid(model->grid, model->config->grid_steady_file);
+    dump_exact_grid(model->grid, model->grid->last_steady->cuboid[0][0], model->config->grid_steady_file);
 
 
 #if VERBOSE > 2
@@ -717,7 +962,7 @@ int main(int argc, char **argv)
   fclose(pin);
   if (do_transient)
     fclose(tout);
-  if(!model->grid->has_lcf)
+  if(model->type == BLOCK_MODEL || !model->grid->has_lcf)
     free_flp(flp, FALSE, FALSE);
   delete_RC_model(model);
   if (do_transient)
@@ -729,6 +974,14 @@ int main(int argc, char **argv)
   free_dvector(overall_power);
   free_names(names);
   free_dvector(vals);
+  if (cycle_state) free_dvector(cycle_state);
+  if (grid_peaks) free_dvector(grid_peaks);
+  if (sample_sums) free_dvector(sample_sums);
+  if (sample_peaks) free_dvector(sample_peaks);
+  if (sample_peak_times) free_dvector(sample_peak_times);
+  if (peak_snapshot) free_dvector(peak_snapshot);
+  if (record_times) fclose(record_times);
+  if (curve) fclose(curve);
 
   printf("Simulation complete.\n");
   return 0;
