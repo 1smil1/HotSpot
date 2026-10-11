@@ -429,7 +429,7 @@ def validate_prepared_options(data: Dict[str, Any], options: Dict[str, Any]) -> 
     if options.get('tile_floorplan_json') is not None:
         raise ValueError('Prepared trace cannot relocate sources; use ThermalManager to regenerate')
     # Older prepared traces were exclusively chiplet/event; these are policy metadata.
-    for field, legacy_policy in (('granularity', 'chiplet'), ('power_mode', 'event')):
+    for field, legacy_policy in (('granularity', 'chiplet'), ('power_mode', 'event'), ('stress_profile', 'hardware_max')):
         declared = data[field] if field in data else legacy_policy
         requested = options[field] if field in options else legacy_policy
         if declared != requested:
