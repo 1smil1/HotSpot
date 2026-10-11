@@ -426,6 +426,14 @@ def validate_prepared_options(data: Dict[str, Any], options: Dict[str, Any]) -> 
         raise ValueError('Prepared trace CLI cannot change physical package/leakage; use ThermalManager CLI')
     if data['workload'] != options['workload']:
         raise ValueError(f'Prepared trace workload {data["workload"]!r} differs from requested {options["workload"]!r}; use ThermalManager to regenerate')
+    if options.get('tile_floorplan_json') is not None:
+        raise ValueError('Prepared trace cannot relocate sources; use ThermalManager to regenerate')
+    # Older prepared traces were exclusively chiplet/event; these are policy metadata.
+    for field, legacy_policy in (('granularity', 'chiplet'), ('power_mode', 'event')):
+        declared = data[field] if field in data else legacy_policy
+        requested = options[field] if field in options else legacy_policy
+        if declared != requested:
+            raise ValueError(f'Prepared trace {field} differs from requested policy; use ThermalManager to regenerate')
     if options['duration_us'] is not None and not math.isclose(options['duration_us'], data['global_end_us']-data['global_start_us'], rel_tol=1e-9):
         raise ValueError('Prepared trace duration differs from requested duration; use ThermalManager to regenerate')
 
